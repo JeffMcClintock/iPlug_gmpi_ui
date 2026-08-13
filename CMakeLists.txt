@@ -44,6 +44,30 @@ else()
     set(GMPI_SDK ${GMPI_SDK_FOLDER_OVERRIDE})
 endif()
 
+# ---------------------------------------------------------------------------
+# Linux: editor only.
+#
+# iPlug2 does not support Linux - Scripts/cmake/IPlug.cmake stops with
+# "Error - Linux not yet supported" - so there is no plugin to build. GainView
+# is portable though, so build a compile-check of it and stop there. See
+# tests/ui_compile_check.cpp.
+# ---------------------------------------------------------------------------
+if(UNIX AND NOT APPLE)
+    message(STATUS "Linux: iPlug2 is unsupported here, building the UI compile-check only")
+
+    add_executable(ui_compile_check tests/ui_compile_check.cpp src/GainView.h)
+    set_target_properties(ui_compile_check PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    target_include_directories(ui_compile_check PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${GMPI_UI_SDK}
+        ${GMPI_UI_SDK}/helpers
+        ${GMPI_SDK}
+        ${GMPI_SDK}/Core
+    )
+
+    return()
+endif()
+
 if("${IPLUG2_FOLDER_OVERRIDE}" STREQUAL "")
     message(STATUS "Fetching iPlug2 from GitHub (this one is large - a few minutes on a cold cache)")
     FetchContent_Declare(

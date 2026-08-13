@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ==========================================================================
+  # The plugin: APP + VST3 everywhere, plus AU on macOS.
+  # ==========================================================================
+  plugin:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-2022
+            # Visual Studio is multi-config, hence --config on the build line.
+            generator: Visual Studio 17 2022
+          - name: macOS
+            os: macos-14
+            # iPlug2's own CI builds macOS with the Xcode generator, so stay on
+            # the path it tests - bundle layout for AU/VST3 depends on it.
+            generator: Xcode
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # A cold configure clones iPlug2 and the VST3 SDK, which is slow and
+      # bandwidth-heavy. Key on CMakeLists.txt so changing a dependency pin
+      # invalidates the cache rather than silently reusing the old checkout.
+      - name: Cache fetched SDKs
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -G "${{ matrix.generator }}"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: build/out/
+          if-no-files-found: error
+
+  # ==========================================================================
+  # Linux: the editor only.
+  #
+  # iPlug2 has no Linux support (its IPlug.cmake stops with "Error - Linux not
+  # yet supported"), so there is no plugin to build here. GainView is plain
+  # GMPI-UI and is portable, so compile it on GCC to catch the slips a
+  # Windows/macOS-only matrix would miss.
+  # ==========================================================================
+  linux-ui:
+    name: Linux (editor compile-check)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache fetched SDKs
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-ubuntu-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run
+        run: ./build/ui_compile_check

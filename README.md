@@ -1,5 +1,7 @@
 # iPlug2 + GMPI-UI
 
+[![build](https://github.com/JeffMcClintock/iPlug_gmpi_ui/actions/workflows/build.yml/badge.svg)](https://github.com/JeffMcClintock/iPlug_gmpi_ui/actions/workflows/build.yml)
+
 A gain plugin whose DSP is [iPlug2](https://github.com/iPlug2/iPlug2) and whose
 user interface is [GMPI-UI](https://github.com/JeffMcClintock/gmpi_ui), instead
 of iPlug2's own IGraphics.
@@ -20,6 +22,13 @@ The first configure clones iPlug2 and the Steinberg VST3 SDK, so give it a few
 minutes. To build against local checkouts instead, set any of
 `-DIPLUG2_FOLDER_OVERRIDE=…`, `-DGMPI_UI_FOLDER_OVERRIDE=…`,
 `-DGMPI_SDK_FOLDER_OVERRIDE=…`.
+
+**Linux** builds the editor but not the plugin. iPlug2 has no Linux support —
+its `Scripts/cmake/IPlug.cmake` stops with *"Error - Linux not yet supported"* —
+so configuring on Linux builds `tests/ui_compile_check.cpp` instead, which
+compiles `GainView` on its own. GMPI-UI itself runs on Linux happily; it is the
+plugin framework that doesn't. CI compiles it there on every push so the editor
+stays portable for when that changes.
 
 ---
 
