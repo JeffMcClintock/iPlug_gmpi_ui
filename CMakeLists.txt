@@ -85,11 +85,20 @@ include(${IPLUG2_DIR}/iPlug2.cmake)
 find_package(iPlug2 REQUIRED)
 
 # ---------------------------------------------------------------------------
-# gmpi_ui's platform backends, plus our window-hosting glue, as a static lib.
+# STEP 1a of 5 - compile GMPI-UI.
 #
-# A separate target rather than plain sources on the plugin, because gmpi_ui's
-# Win32 code needs UNICODE while iPlug2's standalone-app code is ANSI. Keeping
-# UNICODE PRIVATE here lets both compile in one build.
+# GMPI-UI is header-only apart from its platform drawing backends, which have
+# to be compiled by whoever hosts the window. This is that list; it is short,
+# and it is the whole of GMPI-UI's build footprint.
+#
+# Why a separate STATIC library rather than adding these to the plugin target?
+# Because GMPI-UI's Win32 code is a UNICODE build and iPlug2's standalone-app
+# code is ANSI - put them in one target and whichever define you choose breaks
+# the other. Keeping UNICODE PRIVATE to this library lets both compile
+# together. (On macOS there is no such conflict; the library is just tidier.)
+#
+# Our own bridge from step 2 is compiled in here too, for the same reason: it
+# is the file that includes <Windows.h>.
 # ---------------------------------------------------------------------------
 set(GMPI_UI_SRC
     ${GMPI_UI_SDK}/backends/DrawingFrameCommon.cpp
@@ -113,6 +122,8 @@ add_library(gmpi_ui STATIC ${GMPI_UI_SRC} src/GmpiPlugFrame.h)
 
 set_target_properties(gmpi_ui PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 
+# GMPI-UI's headers, plus the GMPI core repo it depends on for a handful of
+# shared interface definitions. PUBLIC so the plugin target inherits them.
 target_include_directories(gmpi_ui PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${GMPI_UI_SDK}
@@ -138,10 +149,20 @@ elseif(APPLE)
 endif()
 
 # ---------------------------------------------------------------------------
-# The plugin.
+# STEP 1b of 5 - tell iPlug2 you are not using IGraphics.
 #
-# UI NONE + NO_IGRAPHICS makes iPlug2 skip IGraphics entirely, leaving
-# IEditorDelegate::OpenWindow() for us to implement with a gmpi_ui frame.
+# These two settings are the entire "opt out of IGraphics" switch, and the
+# hinge the whole integration turns on:
+#
+#   UI NONE              stops iPlug2 compiling and linking IGraphics
+#   DEFINES NO_IGRAPHICS makes IPlugDelegate_select.h pick plain
+#                        IEditorDelegate as the plugin's base class, whose
+#                        editor contract is just OpenWindow/CloseWindow
+#
+# UI NONE alone is not enough - it drops the library but leaves the headers
+# expecting IGEditorDelegate. You want both.
+#
+# LINK gmpi_ui brings in the library from step 1a, with its include paths.
 # ---------------------------------------------------------------------------
 iplug_add_plugin(${PROJECT_NAME}
     SOURCES

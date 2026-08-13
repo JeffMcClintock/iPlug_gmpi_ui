@@ -10,9 +10,43 @@
 #include "helpers/NativeUi.h"
 
 /*
-The UI. Pure GMPI-UI - it knows nothing about iPlug2, and talks back through
-IKnobHost in normalized (0..1) units.
+================================ STEP 4 of 5 =================================
+The editor itself. Everything here is plain GMPI-UI - there is not one iPlug2
+type in this file, and that is deliberate: the same view would drop into a VST3
+wrapper or a SynthEdit module unchanged.
+
+A GMPI-UI editor is an object implementing two interfaces:
+
+  IDrawingClient   measure / arrange / render  - what it looks like
+  IInputClient     onPointerDown / Move / Up   - what it does
+
+Both are COM-style: refcounted, discovered through queryInterface. The two
+macros at the bottom of the class (GMPI_QUERYINTERFACE, GMPI_REFCOUNT) supply
+the boilerplate; you list the interfaces you implement and that is that.
+
+The host calls you in this order:
+
+  setHost(host)        here is the surface you draw on. Call queryInterface on
+                       it for the host services you need. setHost(nullptr) at
+                       shutdown means "let go, the window is going away".
+  measure(avail, out)  how big would you like to be?
+  arrange(rect)        this is the rect you actually got. Save it.
+  render(context)      draw. Called for every dirty region, possibly often.
+
+All coordinates are DIPs (device-independent pixels), not physical pixels. The
+frame applies the DPI scale for you, so never assume the rect you are given
+matches the pixel size of the window - see Layout below.
+
+To ask for a repaint, call IDrawingHost::invalidateRect. Never draw outside
+render().
+==============================================================================
 */
+
+// How this view reports changes back to whoever owns it. Values are normalized
+// 0..1, because a UI control has no business knowing about decibels.
+//
+// Begin/End bracket a gesture (a drag), which is what lets a host record
+// automation as one continuous move rather than a burst of unrelated edits.
 struct IKnobHost
 {
   virtual void OnKnobGestureBegin() = 0;
@@ -47,8 +81,14 @@ inline const Color textBright = colorFromHex(0xEDF4FBu);
 inline const Color textDim    = colorFromHex(0x76889Au);
 inline const Color pointer    = colorFromHex(0xEAF5FFu);
 
-// Everything is derived from the rect the host gave us, so the same code fits
-// whatever DIP size the frame reports at any DPI.
+// Every dimension is derived from the rect the host gave us, and `unit` scales
+// stroke widths and type sizes along with it.
+//
+// This is worth copying. The tempting shortcut is to hardcode the layout to
+// PLUG_WIDTH/PLUG_HEIGHT from config.h - which looks fine on the machine you
+// wrote it on, and is wrong the moment the editor is scaled. GMPI-UI hands you
+// a rect in DIPs; on a 150% display the same window is 240 DIPs wide, not 360.
+// Derive from the rect and the problem disappears.
 struct Layout
 {
   Point centre{};
@@ -84,6 +124,16 @@ inline Point onCircle(Point centre, float radius, float degrees)
   return {centre.x + radius * std::sin(a), centre.y - radius * std::cos(a)};
 }
 
+// A stroked (not filled) circular arc, built as a path geometry.
+//
+// GMPI-UI geometry is built through a "sink": open the geometry, begin a
+// figure at a start point, add segments, end it, close the sink. FigureBegin::
+// Hollow and FigureEnd::Open say "this is a line, not the outline of a shape",
+// which is what stops the two ends being joined by a chord.
+//
+// addArc takes the END point plus the ellipse radii and asks which of the four
+// possible arcs you meant: which direction, and the short way round or the
+// long way. Same model as SVG's elliptical arc command.
 inline PathGeometry arc(Factory factory, Point centre, float radius, float from, float to)
 {
   auto geometry = factory.createPathGeometry();
@@ -113,10 +163,24 @@ public:
     Invalidate();
   }
 
-  // IDrawingClient / IInputClient (one override serves both)
+  // IDrawingClient::setHost and IInputClient::setHost have identical
+  // signatures, so this single override satisfies both - a C++ multiple-
+  // inheritance quirk that GMPI-UI leans on deliberately.
+  //
+  // `pHost` is one object wearing several hats. Ask it for the services you
+  // want:
+  //   IDrawingHost  invalidateRect, the drawing factory, the DPI scale
+  //   IInputHost    mouse capture
+  //   IDialogHost   native text edits, popup menus, file dialogs
+  //
+  // Note we do NOT keep `pHost` itself. queryInterface addRefs what it returns,
+  // which is what these shared_ptrs hold. A raw copy of pHost would be an
+  // un-owned reference to the frame.
   gmpi::ReturnCode setHost(gmpi::api::IUnknown* pHost) override
   {
-    // Any in-flight text edit refers to a window that is about to go away.
+    // setHost(nullptr) is the teardown signal, and the only chance to drop our
+    // references before the frame goes away. Anything holding a window - like
+    // an in-flight text edit - has to go first.
     mTextEdit = {};
     mEditing = false;
 
@@ -133,25 +197,47 @@ public:
     return gmpi::ReturnCode::Ok;
   }
 
+  // "Given at most this much room, how much do you want?"
+  //
+  // Echoing availableSize back means "I am resizable, I'll fill whatever you
+  // give me". A fixed-size editor returns the SAME CONSTANT every time and
+  // ignores availableSize - that difference is how hosts detect resizability,
+  // so "clamp to availableSize" is not the same thing and will bite you.
   gmpi::ReturnCode measure(const gmpi::drawing::Size* availableSize, gmpi::drawing::Size* returnDesiredSize) override
   {
     *returnDesiredSize = *availableSize;
     return gmpi::ReturnCode::Ok;
   }
 
+  // The size we actually got. Everything laid out later derives from this.
   gmpi::ReturnCode arrange(const gmpi::drawing::Rect* finalRect) override
   {
     mBounds = *finalRect;
-    mGlow.invalidate();
+    mGlow.invalidate(); // cached blur is size-dependent
     return gmpi::ReturnCode::Ok;
   }
 
+  // How much of the surface we might paint. The frame uses it to decide what
+  // needs redrawing; claim no more than you actually cover.
   gmpi::ReturnCode getClipArea(gmpi::drawing::Rect* returnRect) override
   {
     *returnRect = mBounds;
     return gmpi::ReturnCode::Ok;
   }
 
+  // Draw. Everything visible in the screenshot happens below.
+  //
+  // Two things to know before reading it:
+  //
+  // 1. `Graphics` is a thin C++ wrapper you construct around the raw context
+  //    the host passes in. `Factory` makes the objects that outlive a single
+  //    call in principle (geometry, stroke styles, text formats), while the
+  //    context makes brushes.
+  // 2. Creating brushes and geometry per frame looks wasteful and is not -
+  //    these are cheap handles, and the platform backends cache underneath. Do
+  //    the obvious thing first; cache only what you have measured. The one
+  //    exception here is the blur, which is genuinely expensive and so is
+  //    cached explicitly.
   gmpi::ReturnCode render(gmpi::drawing::api::IDeviceContext* drawingContext) override
   {
     using namespace gmpi::drawing;
@@ -170,6 +256,9 @@ public:
     auto roundStroke = factory.createStrokeStyle(roundCap);
 
     // ---- background ----
+    // A vertical gradient, plus a radial wash behind the knob so the panel is
+    // not flat. The radial brush's outer stop is fully transparent, which is
+    // how you fade something out rather than fade it to a colour.
     {
       auto bg = g.createLinearGradientBrush({0, mBounds.top}, {0, mBounds.bottom}, bgTop, bgBottom);
       g.fillRectangle(mBounds, bg);
@@ -209,9 +298,17 @@ public:
     {
       const Point tip = onCircle(centre, layout.arcRadius, valueAngle);
 
-      // The halo: the same arc rendered into an offscreen mask, gaussian-blurred
-      // and tinted (helpers/CachedBlur.h). The result is cached, so the blur only
-      // re-runs when the value or the size actually changes.
+      // The halo. GMPI-UI's helpers/CachedBlur.h does the real work: it renders
+      // your drawing into an offscreen single-channel mask, gaussian-blurs the
+      // mask, tints it, and blits the result. It caches that bitmap until you
+      // call invalidate(), which is why SetValue and arrange() both do.
+      //
+      // The lambda draws in the SAME coordinates as the main render - the mask
+      // bitmap is the size of the rect you pass, and is blitted back to the
+      // origin. (Which means the rect must start at 0,0; ours does.)
+      //
+      // Colour is irrelevant inside the mask - only coverage is kept - so paint
+      // it white and let `tint` decide the colour afterwards.
       mGlow.blurRadius = std::max(4, static_cast<int>(15.0f * unit));
       mGlow.tint = interpolateColor(arcLow, arcHigh, 0.35f + 0.5f * static_cast<float>(mValue));
 
@@ -230,7 +327,9 @@ public:
       mGlow.draw(g, mBounds, paintMask);
       mGlow.draw(g, mBounds, paintMask);
 
-      // The crisp arc on top of its own halo. This one carries the gradient.
+      // The crisp arc, drawn on top of its own halo. This one carries the
+      // gradient: a linear brush laid diagonally across the knob, so the sweep
+      // runs teal at the bottom-left through to violet at the top-right.
       auto valueGeometry = arc(factory, centre, layout.arcRadius, angleMin, valueAngle);
       const Gradientstop stops[] = {{0.0f, arcLow}, {1.0f, arcHigh}};
       auto stopCollection = g.createGradientstopCollection(stops);
@@ -326,6 +425,13 @@ public:
     return gmpi::ReturnCode::Ok;
   }
 
+  // ---------------------------------------------------------------------
+  // IInputClient. Points arrive in the same DIP space you drew in, so you can
+  // hit-test straight against your layout with no conversion.
+  //
+  // Return Handled to consume an event, Unhandled to let it pass. Ok from
+  // hitTest means "yes, that point is mine" - this view claims the whole rect.
+  // ---------------------------------------------------------------------
   gmpi::ReturnCode hitTest(gmpi::drawing::Point, int32_t) override { return gmpi::ReturnCode::Ok; }
 
   gmpi::ReturnCode setHover(bool isMouseOverMe) override
@@ -355,10 +461,15 @@ public:
       return gmpi::ReturnCode::Handled;
     }
 
+    // Anchor the drag to where it started rather than accumulating deltas:
+    // accumulating drifts, and clamping at either end then loses your place.
     mDragging = true;
     mDragStartY = point.y;
     mDragStartValue = mValue;
 
+    // Capture routes the mouse to us even once it leaves the window, so a drag
+    // does not stop dead at the edge of the editor. Every setCapture needs its
+    // releaseCapture - ours is in onPointerUp.
     if (mInputHost)
       mInputHost->setCapture();
 
@@ -413,6 +524,9 @@ public:
   gmpi::ReturnCode populateContextMenu(gmpi::drawing::Point, gmpi::api::IUnknown*) override { return gmpi::ReturnCode::Unhandled; }
   gmpi::ReturnCode getToolTip(gmpi::drawing::Point, gmpi::api::IString*) override { return gmpi::ReturnCode::Unhandled; }
 
+  // How the frame discovers what we implement. List every interface here or
+  // the host will silently not use it - a view that renders but ignores the
+  // mouse is usually a missing line in this function.
   gmpi::ReturnCode queryInterface(const gmpi::api::Guid* iid, void** returnInterface) override
   {
     *returnInterface = {};
@@ -420,12 +534,17 @@ public:
     GMPI_QUERYINTERFACE(gmpi::api::IInputClient);
     return gmpi::ReturnCode::NoSupport;
   }
+
+  // Supplies addRef/release: starts at 1, deletes itself at 0. So the owner
+  // calls release() rather than delete - see IPlugGmpiGain::CloseWindow.
   GMPI_REFCOUNT
 
 private:
   // 0 dB on a -60..+12 dB scale.
   static constexpr double kDefaultValue = 60.0 / 72.0;
 
+  // Ask for a repaint. nullptr means the whole surface; pass a rect to redraw
+  // only part of it, which is worth doing for anything animating frequently.
   void Invalidate()
   {
     if (mDrawingHost)
@@ -441,6 +560,15 @@ private:
     Invalidate();
   }
 
+  // Pop a native text field over the readout.
+  //
+  // GMPI-UI does not draw its own text editor - IDialogHost hands you the real
+  // platform control, so you inherit the system caret, selection, IME, right-
+  // click menu and accessibility for free.
+  //
+  // Everything on IDialogHost is asynchronous: showAsync returns immediately
+  // and the callback fires later. Both the editor object and its callback must
+  // therefore outlive this function - members, never locals.
   void BeginTextEdit()
   {
     if (!mDialogHost)
@@ -448,6 +576,8 @@ private:
 
     const knob::Layout layout(mBounds);
 
+    // Dialog-host factories hand back a bare IUnknown; queryInterface for the
+    // interface you wanted. `as<T>()` is shorthand for exactly that.
     gmpi::shared_ptr<gmpi::api::IUnknown> unknown;
     if (gmpi::ReturnCode::Ok != mDialogHost->createTextEdit(&layout.readoutRect, unknown.put()))
       return;
