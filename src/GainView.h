@@ -68,6 +68,18 @@ namespace knob
 {
 using namespace gmpi::drawing;
 
+// macOS gotcha, and one that only shows up when you build there: Carbon's
+// MacTypes.h defines global `Point` and `Rect` (QuickDraw's, with short
+// members). A `using namespace gmpi::drawing` injects competing names into the
+// same scope, so plain `Point` becomes ambiguous - and where it resolves to
+// the Carbon one you get "cannot narrow float to short" instead, which reads
+// like an arithmetic bug rather than a name clash.
+//
+// These aliases are real declarations in this namespace, so they win over both
+// the using-directive and the global names.
+using Point = gmpi::drawing::Point;
+using Rect = gmpi::drawing::Rect;
+
 constexpr float pi = 3.14159265358979f;
 
 // Angles are degrees clockwise from 12 o'clock, so the knob's dead zone sits
@@ -248,6 +260,10 @@ public:
   {
     using namespace gmpi::drawing;
     using namespace knob;
+
+    // Block-scope aliases, for the Carbon Point/Rect clash described above.
+    using Point = gmpi::drawing::Point;
+    using Rect = gmpi::drawing::Rect;
 
     Graphics g(drawingContext);
     auto factory = g.getFactory();
