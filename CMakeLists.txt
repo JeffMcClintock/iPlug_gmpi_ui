@@ -19,7 +19,7 @@ if("${GMPI_UI_FOLDER_OVERRIDE}" STREQUAL "")
     FetchContent_Declare(
         gmpi_ui
         GIT_REPOSITORY https://github.com/JeffMcClintock/gmpi_ui
-        GIT_TAG        origin/main
+        GIT_TAG        origin/claude/iplug2-gmpi-gain-plugin-459eb4
         SOURCE_SUBDIR  helpers
     )
     FetchContent_MakeAvailable(gmpi_ui)
@@ -105,14 +105,6 @@ if(NOT EXISTS ${VST3_SDK_DIR}/pluginterfaces)
 endif()
 
 set(IPLUG2_CXX_STANDARD 20 CACHE STRING "" FORCE)
-
-# GMPI-UI's macOS file dialog uses UTType / allowedContentTypes, which is
-# macOS 11+ and is not guarded by @available. iPlug2 would otherwise default
-# this to 10.13; it only sets it when undefined, so setting it first wins.
-if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
-endif()
-
 include(${IPLUG2_DIR}/iPlug2.cmake)
 find_package(iPlug2 REQUIRED)
 
@@ -177,9 +169,11 @@ elseif(APPLE)
         "-framework CoreGraphics"
         "-framework ImageIO"
         "-framework Accelerate"
-        # for UTType, used by GMPI-UI's file dialog (see the deployment target
-        # note above)
-        "-framework UniformTypeIdentifiers"
+        # For UTType, used by GMPI-UI's file dialog. Weak, because the
+        # framework does not exist before macOS 11 and GMPI-UI guards its use
+        # with @available - a hard link would stop the plugin loading there
+        # instead of taking the fallback path.
+        "-weak_framework UniformTypeIdentifiers"
     )
 endif()
 
