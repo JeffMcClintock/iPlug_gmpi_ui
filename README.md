@@ -58,6 +58,11 @@ GainView  ◀──────SetValue───────  OnParamChangeUI
 Because iPlug2 routes host automation through `OnParamChangeUI` too, automating
 the parameter from the DAW moves the knob with no extra code.
 
+Clicking the readout opens a native text field via GMPI-UI's
+`IDialogHost::createTextEdit`, and the typed string goes back through the same
+interface. The view does not parse it — iPlug2's `IParam::StringToValue` does,
+because the parameter owns its units.
+
 ## Notes on the drawing
 
 - The knob's halo is a real gaussian blur, not stacked translucent strokes: the

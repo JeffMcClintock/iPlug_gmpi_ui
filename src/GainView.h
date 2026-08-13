@@ -18,6 +18,10 @@ struct IKnobHost
   virtual void OnKnobGestureBegin() = 0;
   virtual void OnKnobValueChanged(double normalized) = 0;
   virtual void OnKnobGestureEnd() = 0;
+
+  // Typed into the readout, e.g. "-6.5 dB". The host owns the parsing, because
+  // it owns the units.
+  virtual void OnKnobTextEntered(const std::string& text) = 0;
 };
 
 namespace knob
@@ -51,6 +55,7 @@ struct Layout
   float arcRadius{};
   float bodyRadius{};
   float unit{}; // stroke widths and type sizes scale off this
+  Rect readoutRect{}; // drawn here, and clicked here to type a value
 
   explicit Layout(Rect b)
   {
@@ -61,8 +66,17 @@ struct Layout
     bodyRadius = arcRadius * 0.635f;
     unit = arcRadius / 104.0f;
     centre = {(b.left + b.right) * 0.5f, b.top + h * 0.53f};
+
+    const float halfWidth = bodyRadius * 0.98f;
+    readoutRect = {centre.x - halfWidth, centre.y - 22.0f * unit,
+                   centre.x + halfWidth, centre.y + 22.0f * unit};
   }
 };
+
+inline bool contains(Rect r, Point p)
+{
+  return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
+}
 
 inline Point onCircle(Point centre, float radius, float degrees)
 {
@@ -96,21 +110,25 @@ public:
     mValue = std::clamp(normalized, 0.0, 1.0);
     mDisplay = display;
     mGlow.invalidate();
-
-    if (mDrawingHost)
-      mDrawingHost->invalidateRect(nullptr);
+    Invalidate();
   }
 
   // IDrawingClient / IInputClient (one override serves both)
   gmpi::ReturnCode setHost(gmpi::api::IUnknown* pHost) override
   {
+    // Any in-flight text edit refers to a window that is about to go away.
+    mTextEdit = {};
+    mEditing = false;
+
     mDrawingHost = {};
     mInputHost = {};
+    mDialogHost = {};
 
     if (pHost)
     {
       pHost->queryInterface(&gmpi::api::IDrawingHost::guid, mDrawingHost.put_void());
       pHost->queryInterface(&gmpi::api::IInputHost::guid, mInputHost.put_void());
+      pHost->queryInterface(&gmpi::api::IDialogHost::guid, mDialogHost.put_void());
     }
     return gmpi::ReturnCode::Ok;
   }
@@ -268,26 +286,39 @@ public:
         return format;
       };
 
-      const float halfWidth = layout.bodyRadius * 0.98f;
+      const Rect readoutRect = layout.readoutRect;
 
       auto label = centred(10.5f * unit, FontWeight::SemiBold);
       g.drawTextU("G A I N", label,
-                  {centre.x - halfWidth, centre.y - 42.0f * unit, centre.x + halfWidth, centre.y - 22.0f * unit},
+                  {readoutRect.left, centre.y - 42.0f * unit, readoutRect.right, readoutRect.top},
                   dimBrush);
 
-      auto readout = centred(31.0f * unit, FontWeight::SemiBold);
-      g.drawTextU(mDisplay, readout,
-                  {centre.x - halfWidth, centre.y - 22.0f * unit, centre.x + halfWidth, centre.y + 22.0f * unit},
-                  brightBrush);
+      // Hovering the readout tells you it is a text field.
+      if (mHoverReadout && !mEditing)
+      {
+        const RoundedRect field{readoutRect, 5.0f * unit, 5.0f * unit};
+        auto highlight = g.createSolidColorBrush(Color{1.0f, 1.0f, 1.0f, 0.09f});
+        g.fillRoundedRectangle(field, highlight);
+        auto outline = g.createSolidColorBrush(Color{1.0f, 1.0f, 1.0f, 0.16f});
+        g.drawRoundedRectangle(field, outline, 1.0f * unit);
+      }
+
+      // While the native edit box is up it covers this spot; drawing underneath
+      // it just shows through as a smudge on a partly-transparent field.
+      if (!mEditing)
+      {
+        auto readout = centred(31.0f * unit, FontWeight::SemiBold);
+        g.drawTextU(mDisplay, readout, readoutRect, brightBrush);
+      }
 
       auto title = centred(11.0f * unit, FontWeight::Medium);
       g.drawTextU("iPlug2  \xC2\xB7  GMPI-UI", title,
                   {mBounds.left, mBounds.top + 14.0f * unit, mBounds.right, mBounds.top + 34.0f * unit},
                   dimBrush);
 
-      auto hint = centred(10.0f * unit, FontWeight::Regular);
+      auto hint = centred(9.5f * unit, FontWeight::Regular);
       auto hintBrush = g.createSolidColorBrush(Color{textDim.r, textDim.g, textDim.b, 0.7f});
-      g.drawTextU("drag to adjust  \xC2\xB7  shift = fine  \xC2\xB7  double-click = reset", hint,
+      g.drawTextU("drag  \xC2\xB7  shift = fine  \xC2\xB7  double-click resets  \xC2\xB7  click value to type", hint,
                   {mBounds.left, mBounds.bottom - 32.0f * unit, mBounds.right, mBounds.bottom - 12.0f * unit},
                   hintBrush);
     }
@@ -296,12 +327,25 @@ public:
   }
 
   gmpi::ReturnCode hitTest(gmpi::drawing::Point, int32_t) override { return gmpi::ReturnCode::Ok; }
-  gmpi::ReturnCode setHover(bool) override { return gmpi::ReturnCode::Ok; }
+
+  gmpi::ReturnCode setHover(bool isMouseOverMe) override
+  {
+    if (!isMouseOverMe)
+      SetHoverReadout(false);
+
+    return gmpi::ReturnCode::Ok;
+  }
 
   gmpi::ReturnCode onPointerDown(gmpi::drawing::Point point, int32_t flags) override
   {
     if (0 == (flags & static_cast<int32_t>(gmpi::api::PointerFlags::FirstButton)))
       return gmpi::ReturnCode::Unhandled;
+
+    if (!mEditing && knob::contains(knob::Layout(mBounds).readoutRect, point))
+    {
+      BeginTextEdit();
+      return gmpi::ReturnCode::Handled;
+    }
 
     if (flags & static_cast<int32_t>(gmpi::api::PointerFlags::Double))
     {
@@ -325,7 +369,10 @@ public:
   gmpi::ReturnCode onPointerMove(gmpi::drawing::Point point, int32_t flags) override
   {
     if (!mDragging)
+    {
+      SetHoverReadout(!mEditing && knob::contains(knob::Layout(mBounds).readoutRect, point));
       return gmpi::ReturnCode::Unhandled;
+    }
 
     // Full-scale drag is roughly three knob diameters, so the feel stays the
     // same whatever size the editor is.
@@ -379,15 +426,78 @@ private:
   // 0 dB on a -60..+12 dB scale.
   static constexpr double kDefaultValue = 60.0 / 72.0;
 
+  void Invalidate()
+  {
+    if (mDrawingHost)
+      mDrawingHost->invalidateRect(nullptr);
+  }
+
+  void SetHoverReadout(bool hover)
+  {
+    if (hover == mHoverReadout)
+      return;
+
+    mHoverReadout = hover;
+    Invalidate();
+  }
+
+  void BeginTextEdit()
+  {
+    if (!mDialogHost)
+      return;
+
+    const knob::Layout layout(mBounds);
+
+    gmpi::shared_ptr<gmpi::api::IUnknown> unknown;
+    if (gmpi::ReturnCode::Ok != mDialogHost->createTextEdit(&layout.readoutRect, unknown.put()))
+      return;
+
+    mTextEdit = unknown.as<gmpi::api::ITextEdit>();
+    if (!mTextEdit)
+      return;
+
+    mTextEdit->setText(mDisplay.c_str());
+    mTextEdit->setTextSize(26.0f * layout.unit);
+    mTextEdit->setAlignment(static_cast<int32_t>(gmpi::drawing::TextAlignment::Center) |
+                            static_cast<int32_t>(gmpi::api::TextMultilineFlag::SingleLine));
+
+    // The callback outlives showAsync, so it has to be a member. It is
+    // GMPI_REFCOUNT_NO_DELETE, so pass its address rather than new'ing one.
+    mTextEditCallback.onSuccess = [this](const std::string& text) {
+      EndTextEdit();
+      if (!text.empty())
+        mHost.OnKnobTextEntered(text);
+    };
+    mTextEditCallback.onCancel = [this]() { EndTextEdit(); };
+
+    mEditing = true;
+    mHoverReadout = false;
+    Invalidate();
+
+    mTextEdit->showAsync(&mTextEditCallback);
+  }
+
+  void EndTextEdit()
+  {
+    mEditing = false;
+    mTextEdit = {};
+    Invalidate();
+  }
+
   IKnobHost& mHost;
   gmpi::shared_ptr<gmpi::api::IDrawingHost> mDrawingHost;
   gmpi::shared_ptr<gmpi::api::IInputHost> mInputHost;
+  gmpi::shared_ptr<gmpi::api::IDialogHost> mDialogHost;
+  gmpi::shared_ptr<gmpi::api::ITextEdit> mTextEdit;
+  gmpi::sdk::TextEditCallback mTextEditCallback;
 
   gmpi::drawing::Rect mBounds{};
   cachedBlur mGlow;
   double mValue{kDefaultValue};
   std::string mDisplay{"0.0 dB"};
 
+  bool mEditing{};
+  bool mHoverReadout{};
   bool mDragging{};
   float mDragStartY{};
   double mDragStartValue{};

@@ -32,6 +32,7 @@ public:
   void OnKnobGestureBegin() override;
   void OnKnobValueChanged(double normalized) override;
   void OnKnobGestureEnd() override;
+  void OnKnobTextEntered(const std::string& text) override;
 
 private:
   void PushValueToView();

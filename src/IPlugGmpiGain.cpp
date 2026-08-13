@@ -88,3 +88,20 @@ void IPlugGmpiGain::OnKnobGestureEnd()
 {
   EndInformHostOfParamChangeFromUI(kGain);
 }
+
+void IPlugGmpiGain::OnKnobTextEntered(const std::string& text)
+{
+  const IParam* param = GetParam(kGain);
+
+  // StringToValue understands the parameter's own units and clamps to range,
+  // so "-6", "-6.5 dB" and "nonsense" all land somewhere sane.
+  const double normalized = param->ToNormalized(param->StringToValue(text.c_str()));
+
+  BeginInformHostOfParamChangeFromUI(kGain);
+  SendParameterValueFromUI(kGain, normalized);
+  EndInformHostOfParamChangeFromUI(kGain);
+
+  // The typed text is not necessarily how the parameter formats itself, so
+  // push the canonical display string back to the view.
+  PushValueToView();
+}
