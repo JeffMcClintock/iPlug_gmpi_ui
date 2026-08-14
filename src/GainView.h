@@ -4,12 +4,6 @@
 #include <cmath>
 #include <string>
 
-// <functional> is for CachedBlur.h's benefit, not ours: it takes a
-// std::function without including the header. MSVC and libc++ happen to pull
-// it in transitively, libstdc++ does not, so this is only load-bearing on
-// Linux/GCC. Harmless to drop once gmpi_ui includes it itself.
-#include <functional>
-
 #include "Drawing.h"
 #include "RefCountMacros.h"
 #include "helpers/CachedBlur.h"

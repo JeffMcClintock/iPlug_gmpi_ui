@@ -23,10 +23,6 @@ minutes. To build against local checkouts instead, set any of
 `-DIPLUG2_FOLDER_OVERRIDE=…`, `-DGMPI_UI_FOLDER_OVERRIDE=…`,
 `-DGMPI_SDK_FOLDER_OVERRIDE=…`.
 
-macOS 11 is the minimum: GMPI-UI's file dialog uses `UTType`, which is 11+ and
-is not `@available`-guarded, so the deployment target is raised from iPlug2's
-default of 10.13.
-
 CI builds the plugin on Windows and macOS on every push, and uploads the
 binaries as artifacts.
 
